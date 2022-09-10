@@ -47,21 +47,61 @@ get_table_entry (table_t *table, char *key)
 }
 
 void
-init_table ()
+map_table (table_t *table, void (*fn)(char *c, int x))
 {
-  global_table.key = ""; // malloc(sizeof(char));
+  // First entry in each table is a dummy one we skip
+  while ((table = table->next) != NULL)
+    {
+      fn (table->key, 9);
+    }
+}
+
+void
+add_table_children (table_t *parent, table_t *children)
+{
+  parent->children = children;
+}
+
+void
+init_table (table_t *table)
+{
+  table->key = "";
+  table->children = NULL; // malloc (sizeof (table_t));
+  table->next = NULL; // malloc (sizeof (table_t));
+}
+
+table_t *
+make_table ()
+{
+  table_t *table = malloc (sizeof (table_t));
+  init_table (table);
+
+  return table;
+}
+
+void
+print_key (char *c, int x)
+{
+  fprintf (stderr, "\nThe key was: %s, x was: %d\n", c, x);
 }
 
 int
 main (int argc, char *argv[])
 {
-  init_table ();
-  const char *path = "/foo/bar";
+  init_table (&global_table);
 
-  add_table_entry (&global_table, path);
-  add_table_entry (&global_table, "lolz");
+  table_t *files = make_table ();
+  table_t *paths = &global_table;
 
-  table_t *t = get_table_entry (&global_table, "lolz");
+  add_table_entry (files, "hello");
+  add_table_entry (files, "BuBBles");
+
+  map_table (files, &print_key);
+
+  add_table_entry (paths, "/");
+  add_table_children (paths, files);
+
+  table_t *t = get_table_entry ((&global_table)->children, "hello");
 
   if (t == NULL)
     {
