@@ -422,6 +422,8 @@ static int ciopfs_opendir(const char *path, struct fuse_file_info *fi)
 /* |___/___\___|  \___/_/ \_\___|_||_|___| |___|_|  |_|_| |____| */
 typedef struct table {
   char *key;
+  int offset;
+  long td; // Track the telldir here
   struct table *children;
   struct table *next;
 } table_t;
@@ -429,7 +431,7 @@ typedef struct table {
 table_t global_table;
 
 void
-init_table (table_t *table, char *key)
+init_table (table_t *table, char *key, int offset, long td)
 {
   int key_size = strlen (key);
 
@@ -437,27 +439,29 @@ init_table (table_t *table, char *key)
   memcpy (table->key, key, key_size);
   table->key[key_size] = '\0';
 
+  table->offset = offset;
+  table->td = td;
   table->children = NULL;
   table->next = NULL;
 }
 
 table_t *
-make_table (char *key)
+make_table (char *key, int offset, long td)
 {
   table_t *table = malloc (sizeof (table_t));
-  init_table (table, key);
+  init_table (table, key, offset, td);
 
   return table;
 }
 
 table_t *
-get_table_entry (table_t *table, char *key)
+get_table_entry (table_t *table, char *key, int offset)
 {
   table_t *node = table;
 
   while (node)
     {
-      if (!strcmp (node->key, key))
+      if (0 == strcmp (node->key, key) && offset == node->offset)
         {
           return node;
         }
@@ -469,9 +473,9 @@ get_table_entry (table_t *table, char *key)
 }
 
 table_t *
-add_table_entry (table_t *table, char *key)
+add_table_entry (table_t *table, char *key, int offset, long td)
 {
-  table_t *existing = get_table_entry (table, key);
+  table_t *existing = get_table_entry (table, key, offset);
 
   if (existing)
     {
@@ -482,7 +486,7 @@ add_table_entry (table_t *table, char *key)
   table_t *node = table;
   while (node->next) { node = node->next; }
 
-  table_t *next_table = make_table (key);
+  table_t *next_table = make_table (key, offset, td);
   node->next = next_table;
 
   return next_table;
@@ -508,7 +512,7 @@ static int ciopfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
                           off_t offset, struct fuse_file_info *fi)
 {
   pthread_spin_lock (&lock);
-  table_t *dir_cache = get_table_entry (&global_table, (char *) path);
+  table_t *dir_cache = get_table_entry (&global_table, (char *) path, offset);
   table_t *file_cache;
 
   if (dir_cache != NULL)
@@ -522,7 +526,7 @@ static int ciopfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
       while ((node = node->next) != NULL)
         {
           debug ("Here we go, it's filler time: %s", node->key);
-          filler (buf, node->key, NULL, 0);
+          filler (buf, node->key, NULL, node->td);
         }
 
 
@@ -533,8 +537,8 @@ static int ciopfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
   else
     {
       debug ("CREATED A DIRECTORY CACHE FOR :%s", path);
-      dir_cache = add_table_entry (&global_table, (char *) path);
-      file_cache = make_table ("");
+      dir_cache = add_table_entry (&global_table, (char *) path, offset, 0);
+      file_cache = make_table ("", offset, 0);
       add_table_children (dir_cache, file_cache);
     }
 
@@ -598,9 +602,10 @@ static int ciopfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 				dname = de->d_name;
 		}
 		// debug("dname: %s\n", dname);
-    add_table_entry (file_cache, dname);
+    long td = telldir (dp);
+    add_table_entry (file_cache, dname, offset, td);
 
-		if (filler(buf, dname, &st, telldir(dp))) {
+		if (filler(buf, dname, &st, td)) {
       debug("Failed to give fuse data...");
 			break;
     }
@@ -1131,7 +1136,7 @@ static struct fuse_opt ciopfs_opts[] = {
 int main(int argc, char *argv[])
 {
   pret = pthread_spin_init (&lock, pshared);
-  init_table (&global_table, "");
+  init_table (&global_table, "", 0, 0);
 
 	struct fuse_args args = FUSE_ARGS_INIT(argc, argv);
 	fuse_opt_parse(&args, &dirname, ciopfs_opts, ciopfs_opt_parse);
