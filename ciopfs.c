@@ -65,6 +65,7 @@
 #include <limits.h>
 #include <syslog.h>
 #include <grp.h>
+#include <pthread.h>
 
 #if __GNUC__ >= 3
 # define likely(x)       __builtin_expect(!!(x), 1)
@@ -142,7 +143,7 @@ static char *map_path(const char *path)
 	}
 
 	p = str_fold(path);
-	debug("%s => %s\n", path, p);
+	// debug("%s => %s\n", path, p);
 	return p;
 }
 
@@ -415,28 +416,147 @@ static int ciopfs_opendir(const char *path, struct fuse_file_info *fi)
 	return 0;
 }
 
+/*  ___ ___ ___    ___   _   ___ _  _ ___   ___ __  __ ___ _ */
+/* | _ ) __/ __|  / __| /_\ / __| || | __| |_ _|  \/  | _ \ | */
+/* | _ \ _| (_ | | (__ / _ \ (__| __ | _|   | || |\/| |  _/ |__ */
+/* |___/___\___|  \___/_/ \_\___|_||_|___| |___|_|  |_|_| |____| */
+typedef struct table {
+  char *key;
+  struct table *children;
+  struct table *next;
+} table_t;
+
+table_t global_table;
+
+void
+init_table (table_t *table, char *key)
+{
+  int key_size = strlen (key);
+
+  table->key = malloc (key_size + 1);
+  memcpy (table->key, key, key_size);
+  table->key[key_size] = '\0';
+
+  table->children = NULL;
+  table->next = NULL;
+}
+
+table_t *
+make_table (char *key)
+{
+  table_t *table = malloc (sizeof (table_t));
+  init_table (table, key);
+
+  return table;
+}
+
+table_t *
+get_table_entry (table_t *table, char *key)
+{
+  table_t *node = table;
+
+  while (node)
+    {
+      if (!strcmp (node->key, key))
+        {
+          return node;
+        }
+
+      node = node->next;
+    }
+
+  return NULL;
+}
+
+table_t *
+add_table_entry (table_t *table, char *key)
+{
+  table_t *existing = get_table_entry (table, key);
+
+  if (existing)
+    {
+      debug ("Found existant table entry");
+      return existing;
+    }
+
+  table_t *node = table;
+  while (node->next) { node = node->next; }
+
+  table_t *next_table = make_table (key);
+  node->next = next_table;
+
+  return next_table;
+}
+
+void
+add_table_children (table_t *parent, table_t *children)
+{
+  if (parent == NULL) return;
+  parent->children = children;
+}
+
+pthread_spinlock_t lock;
+int pshared = PTHREAD_PROCESS_SHARED;
+int pret;
+/*  ___ _  _ ___     ___   _   ___ _  _ ___   ___ __  __ ___ _ */
+/* | __| \| |   \   / __| /_\ / __| || | __| |_ _|  \/  | _ \ | */
+/* | _|| .` | |) | | (__ / _ \ (__| __ | _|   | || |\/| |  _/ |__ */
+/* |___|_|\_|___/   \___/_/ \_\___|_||_|___| |___|_|  |_|_| |____| */
+
+
 static int ciopfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
                           off_t offset, struct fuse_file_info *fi)
 {
-	int ret = 0;
-	DIR *dp = (DIR *)(uintptr_t)fi->fh;
-	struct dirent *de;
-	char *p = map_path(path);
-	if (unlikely(p == NULL))
-		return -ENOMEM;
-	size_t pathlen = strlen(p);
-	char dnamebuf[PATH_MAX];
-	char attrbuf[FILENAME_MAX];
+  pthread_spin_lock (&lock);
+  table_t *dir_cache = get_table_entry (&global_table, (char *) path);
+  table_t *file_cache;
 
-	if (pathlen > PATH_MAX) {
-		ret = -ENAMETOOLONG;
-		goto out;
-	}
+  if (dir_cache != NULL)
+    {
+      debug ("Found a directory cache!");
 
-	if (!dp) {
-		ret = -EBADF;
-		goto out;
-	}
+      file_cache = dir_cache->children;
+      table_t *node = file_cache;
+
+      // First entry in each table is a dummy one we skip, then call fuse filler for each cache
+      while ((node = node->next) != NULL)
+        {
+          debug ("Here we go, it's filler time: %s", node->key);
+          filler (buf, node->key, NULL, 0);
+        }
+
+
+      pthread_spin_unlock (&lock);
+
+      return 0;
+    }
+  else
+    {
+      debug ("CREATED A DIRECTORY CACHE FOR :%s", path);
+      dir_cache = add_table_entry (&global_table, (char *) path);
+      file_cache = make_table ("");
+      add_table_children (dir_cache, file_cache);
+    }
+
+  int ret = 0;
+  DIR *dp = (DIR *)(uintptr_t)fi->fh;
+  struct dirent *de;
+  char *p = map_path(path);
+  if (unlikely(p == NULL))
+    return -ENOMEM;
+  size_t pathlen = strlen(p);
+  char dnamebuf[PATH_MAX];
+  char attrbuf[FILENAME_MAX];
+
+  if (pathlen > PATH_MAX) {
+    ret = -ENAMETOOLONG;
+    goto out;
+  }
+
+  if (!dp) {
+    ret = -EBADF;
+    goto out;
+  }
 
 	seekdir(dp, offset);
 
@@ -461,7 +581,7 @@ static int ciopfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 			 * case one
 			 */
 			snprintf(dnamebuf, sizeof dnamebuf, "%s/%s", p, de->d_name);
-			debug("dnamebuf: %s de->d_name: %s\n", dnamebuf, de->d_name);
+			// debug("dnamebuf: %s de->d_name: %s\n", dnamebuf, de->d_name);
 			if (ciopfs_get_orig_name(dnamebuf, attrbuf, sizeof attrbuf) > 0) {
 				/* we found an original name now check whether it is
 				 * still accurate and if not remove it
@@ -477,13 +597,18 @@ static int ciopfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 			} else
 				dname = de->d_name;
 		}
-		debug("dname: %s\n", dname);
-		if (filler(buf, dname, &st, telldir(dp)))
+		// debug("dname: %s\n", dname);
+    add_table_entry (file_cache, dname);
+
+		if (filler(buf, dname, &st, telldir(dp))) {
+      debug("Failed to give fuse data...");
 			break;
+    }
 	}
 
 out:
 	free(p);
+  pthread_spin_unlock (&lock);
 	return ret;
 }
 
@@ -1005,6 +1130,9 @@ static struct fuse_opt ciopfs_opts[] = {
 
 int main(int argc, char *argv[])
 {
+  pret = pthread_spin_init (&lock, pshared);
+  init_table (&global_table, "");
+
 	struct fuse_args args = FUSE_ARGS_INIT(argc, argv);
 	fuse_opt_parse(&args, &dirname, ciopfs_opts, ciopfs_opt_parse);
 
