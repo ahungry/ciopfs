@@ -499,9 +499,37 @@ add_table_children (table_t *parent, table_t *children)
   parent->children = children;
 }
 
+void
+destroy_table (table_t **table)
+{
+  table_t *tmp = *table;
+  table_t *next;
+
+  while (tmp)
+    {
+      next = tmp->next;
+      destroy_table (&tmp->children);
+      tmp->children = NULL;
+      tmp->next = NULL;
+      free (tmp->key);
+      free (tmp);
+      tmp = next;
+    }
+
+  *table = NULL;
+}
+
 pthread_spinlock_t lock;
 int pshared = PTHREAD_PROCESS_SHARED;
 int pret;
+
+void
+invalidate_cache ()
+{
+  pthread_spin_lock (&lock);
+  destroy_table (&(&global_table)->next);
+  pthread_spin_unlock (&lock);
+}
 /*  ___ _  _ ___     ___   _   ___ _  _ ___   ___ __  __ ___ _ */
 /* | __| \| |   \   / __| /_\ / __| || | __| |_ _|  \/  | _ \ | */
 /* | _|| .` | |) | | (__ / _ \ (__| __ | _|   | || |\/| |  _/ |__ */
@@ -515,7 +543,7 @@ static int ciopfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
   table_t *dir_cache = get_table_entry (&global_table, (char *) path, offset);
   table_t *file_cache;
 
-  if (dir_cache != NULL)
+  if (dir_cache != NULL && dir_cache->children != NULL)
     {
       debug ("Found a directory cache!");
 
@@ -525,7 +553,7 @@ static int ciopfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
       // First entry in each table is a dummy one we skip, then call fuse filler for each cache
       while ((node = node->next) != NULL)
         {
-          debug ("Here we go, it's filler time: %s", node->key);
+          // debug ("Here we go, it's filler time: %s", node->key);
           filler (buf, node->key, NULL, node->td);
         }
 
@@ -534,13 +562,15 @@ static int ciopfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 
       return 0;
     }
-  else
+
+  if (dir_cache == NULL)
     {
       debug ("CREATED A DIRECTORY CACHE FOR :%s", path);
       dir_cache = add_table_entry (&global_table, (char *) path, offset, 0);
-      file_cache = make_table ("", offset, 0);
-      add_table_children (dir_cache, file_cache);
     }
+
+  file_cache = make_table ("", offset, 0);
+  add_table_children (dir_cache, file_cache);
 
   int ret = 0;
   DIR *dp = (DIR *)(uintptr_t)fi->fh;
@@ -628,6 +658,7 @@ static int ciopfs_releasedir(const char *path, struct fuse_file_info *fi)
 
 static int ciopfs_mknod(const char *path, mode_t mode, dev_t rdev)
 {
+  invalidate_cache ();
 	int res;
 	char *p = map_path(path);
 	if (unlikely(p == NULL))
@@ -655,6 +686,7 @@ static int ciopfs_mknod(const char *path, mode_t mode, dev_t rdev)
 
 static int ciopfs_mkdir(const char *path, mode_t mode)
 {
+  invalidate_cache ();
 	char *p = map_path(path);
 	if (unlikely(p == NULL))
 		return -ENOMEM;
@@ -671,6 +703,7 @@ static int ciopfs_mkdir(const char *path, mode_t mode)
 
 static int ciopfs_unlink(const char *path)
 {
+  invalidate_cache ();
 	char *p = map_path(path);
 	if (unlikely(p == NULL))
 		return -ENOMEM;
@@ -685,6 +718,7 @@ static int ciopfs_unlink(const char *path)
 
 static int ciopfs_rmdir(const char *path)
 {
+  invalidate_cache ();
 	char *p = map_path(path);
 	if (unlikely(p == NULL))
 		return -ENOMEM;
@@ -699,6 +733,7 @@ static int ciopfs_rmdir(const char *path)
 
 static int ciopfs_symlink(const char *from, const char *to)
 {
+  invalidate_cache ();
 	char *t = map_path(to);
 	if (unlikely(t == NULL))
 		return -ENOMEM;
@@ -715,6 +750,7 @@ static int ciopfs_symlink(const char *from, const char *to)
 
 static int ciopfs_rename(const char *from, const char *to)
 {
+  invalidate_cache ();
 	char *f = map_path(from);
 	char *t = map_path(to);
 	if (unlikely(f == NULL || t == NULL))
@@ -733,6 +769,7 @@ static int ciopfs_rename(const char *from, const char *to)
 
 static int ciopfs_link(const char *from, const char *to)
 {
+  invalidate_cache ();
 	char *f = map_path(from);
 	char *t = map_path(to);
 	if (unlikely(f == NULL || t == NULL))
@@ -824,6 +861,7 @@ static int ciopfs_utimens(const char *path, const struct timespec ts[2])
 
 static int ciopfs_create(const char *path, mode_t mode, struct fuse_file_info *fi)
 {
+  invalidate_cache ();
 	int ret;
 	char *p = map_path(path);
 	if (unlikely(p == NULL))
@@ -873,6 +911,7 @@ static int ciopfs_read(const char *path, char *buf, size_t size, off_t offset,
 static int ciopfs_write(const char *path, const char *buf, size_t size,
                         off_t offset, struct fuse_file_info *fi)
 {
+  invalidate_cache ();
 	int res = pwrite(fi->fh, buf, size, offset);
 	if (res == -1)
 		res = -errno;
