@@ -12,9 +12,8 @@ I have extended ciopfs.c to provide some caching to greatly speed up
 the readdir fuse operation for my own purposes (repeated listing of
 file contents in a directory with 100k+ files).
 
-I do *not* have cache invalidation at the moment (if someone wanted to
-add it, it could be in the _write functions, at which point this whole
-thing may be pretty similar to a journaled filesystem like ext3/4).
+It also includes cache invalidation, so shouldn't have any stale cache
+issues.
 
 # ciopfs
 
