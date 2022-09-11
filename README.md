@@ -2,7 +2,9 @@
 
 # NOTE
 
-This readme was sourced from https://github.com/arthurpro/ciopfs,
+The repo was forked from https://github.com/martanne/ciopfs
+
+The readme was sourced from https://github.com/arthurpro/ciopfs
 which seems to be a ciopfs detached fork, with a readme built from
 contents of the ciopfs website.
 
